@@ -1,0 +1,170 @@
+name: stage
+on:
+  workflow_call:
+    inputs:
+      stage: {type: number, required: true}
+      nvarch: {type: string, required: true}
+      nvhpc_tag: {type: string, required: true}
+      budget_min: {type: string, required: true}
+      last: {type: boolean, default: false}
+    outputs:
+      done:
+        value: ${{ jobs.compile.outputs.done }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  compile:
+    name: compile stage ${{ inputs.stage }} (sm_${{ inputs.nvarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    outputs:
+      done: ${{ steps.status.outputs.done }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free runner disk (image is ~15+ GB unpacked)
+        run: |
+          df -h / /mnt || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium \
+            /usr/local/lib/node_modules /opt/microsoft /opt/google /opt/az /usr/lib/jvm "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker system prune -af --volumes >/dev/null || true
+          sudo swapoff -a || true; sudo rm -f /mnt/swapfile /swapfile || true
+          # put the docker / buildkit data root on the bigger of / and /mnt
+          sudo systemctl stop docker docker.socket || true
+          root_free=$(df --output=avail -k / | tail -1); mnt_free=$(df --output=avail -k /mnt | tail -1 || echo 0)
+          if [ "${mnt_free:-0}" -gt "$root_free" ]; then
+            sudo mkdir -p /mnt/docker
+            { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"data-root":"/mnt/docker"}' > /tmp/daemon.json
+            sudo cp /tmp/daemon.json /etc/docker/daemon.json; cat /etc/docker/daemon.json
+          fi
+          sudo systemctl start docker
+          sudo fallocate -l 6G /swapfile2 && sudo chmod 600 /swapfile2 && sudo mkswap /swapfile2 >/dev/null && sudo swapon /swapfile2 || true
+          df -h / /mnt; free -g; nproc
+
+      - name: Vars
+        id: v
+        run: |
+          repo=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          short=${GITHUB_SHA::7}
+          n=${{ inputs.stage }}
+          arch=${{ inputs.nvarch }}
+          if [ "$n" = 1 ]; then prev=src; else prev="$repo:wip-${short}-sm${arch}-$((n-1))"; fi
+          if [ "$arch" = 90 ]; then
+            tags="$repo:latest,$repo:${short},$repo:sm90,$repo:sm90-${short}"
+          else
+            tags="$repo:sm${arch},$repo:sm${arch}-${short}"
+          fi
+          { echo "repo=$repo"; echo "short=$short"; echo "prev=$prev"; echo "tags=$tags"
+            echo "wip=$repo:wip-${short}-sm${arch}-${n}"; echo "t0=$(date +%s)"; } >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          # keep the multi-GB compile result in the builder cache so the status/final steps reuse it, never rebuild it
+          buildkitd-config-inline: |
+            [worker.oci]
+              gc = false
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deps layers (base + SPUMA source) with GHA cache
+        if: inputs.stage == 1
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: src
+          push: false
+          provenance: false
+          build-args: |
+            NVHPC_TAG=${{ inputs.nvhpc_tag }}
+            NVARCH=${{ inputs.nvarch }}
+          cache-from: type=gha,scope=deps-sm${{ inputs.nvarch }}
+          cache-to: type=gha,scope=deps-sm${{ inputs.nvarch }},mode=max
+
+      - name: Compile (time-boxed to ${{ inputs.budget_min }} min) and push WIP image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: compile
+          push: true
+          provenance: false
+          tags: ${{ steps.v.outputs.wip }}
+          build-args: |
+            NVHPC_TAG=${{ inputs.nvhpc_tag }}
+            NVARCH=${{ inputs.nvarch }}
+            PREV=${{ steps.v.outputs.prev }}
+            STAGE=${{ inputs.stage }}
+            BUILD_BUDGET_MIN=${{ inputs.budget_min }}
+          cache-from: type=gha,scope=deps-sm${{ inputs.nvarch }}
+
+      - name: Read build status
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: status
+          push: false
+          provenance: false
+          outputs: type=local,dest=status-out
+          build-args: |
+            NVHPC_TAG=${{ inputs.nvhpc_tag }}
+            NVARCH=${{ inputs.nvarch }}
+            PREV=${{ steps.v.outputs.prev }}
+            STAGE=${{ inputs.stage }}
+            BUILD_BUDGET_MIN=${{ inputs.budget_min }}
+          cache-from: type=gha,scope=deps-sm${{ inputs.nvarch }}
+
+      - name: Status
+        id: status
+        run: |
+          s=$(cat status-out/BUILD_STATUS); echo "BUILD_STATUS=$s"
+          ls -la status-out
+          tail -n 60 status-out/allwmake.stage${{ inputs.stage }}.log || true
+          if [ "$s" = complete ]; then echo "done=true" >> "$GITHUB_OUTPUT"; else echo "done=false" >> "$GITHUB_OUTPUT"; fi
+          if [ "$s" != complete ] && [ "${{ inputs.last }}" = true ]; then echo "::error::compile still partial after the last stage"; exit 1; fi
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-sm${{ inputs.nvarch }}-stage${{ inputs.stage }}
+          path: status-out/
+          if-no-files-found: ignore
+
+      - name: Build and push final image
+        if: steps.status.outputs.done == 'true'
+        id: final
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: final
+          push: true
+          provenance: false
+          tags: ${{ steps.v.outputs.tags }}
+          build-args: |
+            NVHPC_TAG=${{ inputs.nvhpc_tag }}
+            NVARCH=${{ inputs.nvarch }}
+            PREV=${{ steps.v.outputs.prev }}
+            STAGE=${{ inputs.stage }}
+            BUILD_BUDGET_MIN=${{ inputs.budget_min }}
+          cache-from: type=gha,scope=deps-sm${{ inputs.nvarch }}
+
+      - name: Report image
+        if: steps.status.outputs.done == 'true'
+        run: |
+          echo "digest=${{ steps.final.outputs.digest }}"
+          docker buildx imagetools inspect --raw "${{ steps.v.outputs.repo }}@${{ steps.final.outputs.digest }}" > manifest.json
+          jq '{layers: (.layers|length), compressed_bytes: ([.layers[].size]|add)}' manifest.json
+          {
+            echo "### Image pushed"
+            echo "- ref: \`${{ steps.v.outputs.repo }}@${{ steps.final.outputs.digest }}\`"
+            echo "- tags: ${{ steps.v.outputs.tags }}"
+            echo "- compressed size: $(jq '[.layers[].size]|add' manifest.json) bytes"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,64 @@
+name: build
+# Builds the SPUMA solver image on free GitHub-hosted runners and pushes it to ghcr.io.
+# The compile is chained over up to 4 jobs (each < 6 h): every job resumes the previous job's partial build image
+# (ghcr.io/<repo>:wip-<sha>-sm<NVARCH>-<n>), and the first job that finishes the compile pushes the final image.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['README.md', 'runpod/**']
+  workflow_dispatch:
+    inputs:
+      nvarch:
+        description: 'CUDA compute capability (90 = H100/H200, 100 = B200 needs NVHPC >= 25.x)'
+        default: '90'
+      nvhpc_tag:
+        description: 'nvcr.io/nvidia/nvhpc tag'
+        default: '24.3-devel-cuda12.3-ubuntu22.04'
+      budget_min:
+        description: 'compile minutes per job (job limit is 360 incl. pull/push)'
+        default: '250'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-sm${{ inputs.nvarch || '90' }}
+  cancel-in-progress: true
+
+jobs:
+  stage1:
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 1
+      nvarch: ${{ inputs.nvarch || '90' }}
+      nvhpc_tag: ${{ inputs.nvhpc_tag || '24.3-devel-cuda12.3-ubuntu22.04' }}
+      budget_min: ${{ inputs.budget_min || '250' }}
+  stage2:
+    needs: stage1
+    if: needs.stage1.outputs.done != 'true'
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 2
+      nvarch: ${{ inputs.nvarch || '90' }}
+      nvhpc_tag: ${{ inputs.nvhpc_tag || '24.3-devel-cuda12.3-ubuntu22.04' }}
+      budget_min: ${{ inputs.budget_min || '250' }}
+  stage3:
+    needs: stage2
+    if: needs.stage2.outputs.done != 'true'
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 3
+      nvarch: ${{ inputs.nvarch || '90' }}
+      nvhpc_tag: ${{ inputs.nvhpc_tag || '24.3-devel-cuda12.3-ubuntu22.04' }}
+      budget_min: ${{ inputs.budget_min || '250' }}
+  stage4:
+    needs: stage3
+    if: needs.stage3.outputs.done != 'true'
+    uses: ./.github/workflows/stage.yml
+    with:
+      stage: 4
+      nvarch: ${{ inputs.nvarch || '90' }}
+      nvhpc_tag: ${{ inputs.nvhpc_tag || '24.3-devel-cuda12.3-ubuntu22.04' }}
+      budget_min: ${{ inputs.budget_min || '250' }}
+      last: true
