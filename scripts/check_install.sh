@@ -2,10 +2,10 @@
 # Verifies the solver install: required executables exist and every shared library they need resolves
 # (libcuda.so.1 / libnvidia-ml come from the host driver at runtime, so they are allowed to be missing here).
 set -uo pipefail
-set +eu
+# NVHPC/CUDA/HPC-X paths from /etc/environment, then the SPUMA env
+export GG_FOAM_ENV_DONE=
 # shellcheck source=/dev/null
-. /opt/spuma/etc/bashrc
-set -u
+. /etc/profile.d/00-spuma.sh
 REQ="pimpleFoam pisoFoam simpleFoam potentialFoam blockMesh snappyHexMesh surfaceFeatureExtract decomposePar
      reconstructPar reconstructParMesh redistributePar checkMesh foamDictionary postProcess renumberMesh topoSet
      createPatch mapFields setFields foamToVTK foamListTimes"
