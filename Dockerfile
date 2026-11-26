@@ -25,7 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN grep -rl -i mellanox /etc/apt/sources.list.d/ 2>/dev/null | xargs -r rm -f \
  && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
  && apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-      git ca-certificates build-essential flex bison cmake zlib1g-dev libscotch-dev libfftw3-dev \
+      git ca-certificates build-essential flex libfl-dev bison m4 cmake zlib1g-dev libscotch-dev libfftw3-dev \
       libboost-system-dev libboost-thread-dev libreadline-dev \
       python3 python3-pip rsync jq procps openssh-server openssh-client curl less vim-tiny tmux htop \
       libgl1 libx11-6 libxrender1 libxext6 libxcursor1 libxft2 libxinerama1 \

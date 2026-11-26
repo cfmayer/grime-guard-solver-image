@@ -20,7 +20,7 @@ Five on-pod attempts to install and compile SPUMA on a billed H200 pod failed ($
 | 14:14 | liveness poll declared failure 1 s after starting the detached compile (race), so the multi-hour compile never ran | compile happens in CI, not on the pod |
 | 14:22 | `ssh: Connection refused`: sshd was apt-installed by the start command and was not up yet | `openssh-server` baked in; entrypoint starts sshd immediately from `$PUBLIC_KEY` |
 
-The original `node/Dockerfile.spuma` was never built (no Docker on the box). Building it surfaced five more blockers,
+The original `node/Dockerfile.spuma` was never built (no Docker on the box). Building it surfaced six more blockers,
 all fixed here (each one was hit in a local test build, then fixed):
 
 | failure in the original Dockerfile | fix |
@@ -29,6 +29,7 @@ all fixed here (each one was hit in a local test build, then fixed):
 | `nvc++-Error-CUDA version 11.8 is not available`: with no GPU driver (any CI builder) nvc++ falls back to CUDA 11.8 | pin `NVHPC_CUDA_HOME` to the installed CUDA (12.3) |
 | `mpicc-Error-MPI matching the current driver version (0)...`, then `mpi.h` not found | use the HPC-X OpenMPI directly (`comm_libs/12.3/hpcx/latest/ompi`), same at build and run time |
 | `nvcc fatal: Unknown option '-Wextra'` on the first `.cu` file: `Allwmake -q` (queue mode) drops the quoting of `--compiler-options` | build without `-q` |
+| `FlexLexer.h` not found (`STLAsciiParseFlex.L`): `flex` without its recommended `libfl-dev` | install `libfl-dev` |
 | nvc++ defaults to `-tp=native`, so binaries would target whatever CPU the CI runner had (SIGILL risk on the pod) | `-tp=x86-64-v3` (AVX2/FMA) patched into the Nvidia wmake rules |
 
 Other build fixes vs. the original `Dockerfile.spuma`: system scotch (snappyHexMesh decomposition uses `method scotch`;
