@@ -97,6 +97,10 @@ jobs:
 
           if [ "$n" != 1 ]; then
             prev="$repo:wip-${short}-sm${arch}-$((n-1))"
+            if ! exists "$prev"; then
+              echo "::error::PREV $prev not found. Stage $n only runs when stage $((n-1)) of this run pushed that tag. If the final image was already pushed, the stage-chain if-condition should have skipped this job."
+              exit 1
+            fi
             echo "prev=$prev" >> "$GITHUB_OUTPUT"
             echo "PREV=$prev (this run, previous stage)"
             exit 0

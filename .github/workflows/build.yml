@@ -40,9 +40,14 @@ jobs:
       nvhpc_tag: ${{ inputs.nvhpc_tag || '24.3-devel-cuda12.3-ubuntu22.04' }}
       budget_min: ${{ inputs.budget_min || '250' }}
       fresh: ${{ github.event_name == 'workflow_dispatch' && inputs.fresh == true }}
+  # Later stages run only if the previous stage actually ran and did not push the final
+  # image. `!cancelled()` alone is not enough: a skipped stage has an empty `done`, so
+  # `done != 'true'` would be true and the next stage would start, then fail looking for
+  # a this-run WIP tag that was never pushed (run 45890928206: stage1 pushed final,
+  # stage2 skipped, stage3/4 ran and died on wip-5b971e2-sm90-2/3 not found).
   stage2:
     needs: stage1
-    if: ${{ !cancelled() && needs.stage1.outputs.done != 'true' }}
+    if: ${{ !cancelled() && needs.stage1.result != 'skipped' && needs.stage1.outputs.done != 'true' }}
     uses: ./.github/workflows/stage.yml
     with:
       stage: 2
@@ -51,7 +56,7 @@ jobs:
       budget_min: ${{ inputs.budget_min || '250' }}
   stage3:
     needs: stage2
-    if: ${{ !cancelled() && needs.stage2.outputs.done != 'true' }}
+    if: ${{ !cancelled() && needs.stage2.result != 'skipped' && needs.stage2.outputs.done != 'true' }}
     uses: ./.github/workflows/stage.yml
     with:
       stage: 3
@@ -60,7 +65,7 @@ jobs:
       budget_min: ${{ inputs.budget_min || '250' }}
   stage4:
     needs: stage3
-    if: ${{ !cancelled() && needs.stage3.outputs.done != 'true' }}
+    if: ${{ !cancelled() && needs.stage3.result != 'skipped' && needs.stage3.outputs.done != 'true' }}
     uses: ./.github/workflows/stage.yml
     with:
       stage: 4
