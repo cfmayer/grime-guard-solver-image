@@ -19,6 +19,16 @@ for l in libfiniteVolume libturbulenceModels libincompressibleTurbulenceModels l
          liblagrangianFunctionObjects libscotchDecomp libdecompose libsnappyHexMesh libfieldFunctionObjects; do
   f=$(ls "$FOAM_LIBBIN/$l.so" 2>/dev/null) && echo "ok $l" || { echo "MISSING lib $l"; fail=1; }
 done
-[ -d "$FOAM_TUTORIALS/incompressible/pimpleFoam/LES/pitzDaily" ] && echo "ok tutorials" || { echo "MISSING pitzDaily tutorial"; fail=1; }
+# SPUMA 0.3-v2512 has no pimpleFoam/LES/pitzDaily (that path is older OpenFOAM).
+# LES pitzDaily lives under pisoFoam/LES; pimpleFoam only has RAS/pitzDaily.
+tut=${FOAM_TUTORIALS:-/opt/spuma/tutorials}
+found=
+for d in \
+    "$tut/incompressible/pimpleFoam/LES/pitzDaily" \
+    "$tut/incompressible/pisoFoam/LES/pitzDaily" \
+    "$tut/incompressible/pimpleFoam/RAS/pitzDaily"; do
+  if [ -d "$d" ]; then found=$d; break; fi
+done
+if [ -n "$found" ]; then echo "ok tutorials -> $found"; else echo "MISSING pitzDaily tutorial under $tut"; fail=1; fi
 echo "WM_OPTIONS=$WM_OPTIONS FOAM_MPI=$FOAM_MPI"
 exit $fail

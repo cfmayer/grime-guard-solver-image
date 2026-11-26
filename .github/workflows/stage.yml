@@ -7,6 +7,7 @@ on:
       nvhpc_tag: {type: string, required: true}
       budget_min: {type: string, required: true}
       last: {type: boolean, default: false}
+      fresh: {type: boolean, default: false}
     outputs:
       done:
         value: ${{ jobs.compile.outputs.done }}
@@ -21,9 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     outputs:
-      done: ${{ steps.status.outputs.done }}
+      # Only true after the final image is actually pushed. Compile-complete plus a failed
+      # prune/push must not skip later stages (or force a 6 h recompile on the next run).
+      done: ${{ steps.final.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
 
       - name: Free runner disk (image is ~15+ GB unpacked)
         run: |
@@ -52,14 +57,15 @@ jobs:
           short=${GITHUB_SHA::7}
           n=${{ inputs.stage }}
           arch=${{ inputs.nvarch }}
-          if [ "$n" = 1 ]; then prev=src; else prev="$repo:wip-${short}-sm${arch}-$((n-1))"; fi
           if [ "$arch" = 90 ]; then
             tags="$repo:latest,$repo:${short},$repo:sm90,$repo:sm90-${short}"
           else
             tags="$repo:sm${arch},$repo:sm${arch}-${short}"
           fi
-          { echo "repo=$repo"; echo "short=$short"; echo "prev=$prev"; echo "tags=$tags"
-            echo "wip=$repo:wip-${short}-sm${arch}-${n}"; echo "t0=$(date +%s)"; } >> "$GITHUB_OUTPUT"
+          { echo "repo=$repo"; echo "short=$short"; echo "tags=$tags"
+            echo "wip=$repo:wip-${short}-sm${arch}-${n}"
+            echo "floating=$repo:wip-sm${arch}"
+            echo "t0=$(date +%s)"; } >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
@@ -75,8 +81,66 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve PREV (resume from latest WIP across commits)
+        id: prev
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${{ steps.v.outputs.repo }}"
+          path=${repo#ghcr.io/}
+          arch=${{ inputs.nvarch }}
+          n=${{ inputs.stage }}
+          short=${{ steps.v.outputs.short }}
+          floating="$repo:wip-sm${arch}"
+          exists() { docker manifest inspect "$1" >/dev/null 2>&1; }
+
+          if [ "$n" != 1 ]; then
+            prev="$repo:wip-${short}-sm${arch}-$((n-1))"
+            echo "prev=$prev" >> "$GITHUB_OUTPUT"
+            echo "PREV=$prev (this run, previous stage)"
+            exit 0
+          fi
+          if [ "${{ inputs.fresh }}" = true ]; then
+            echo "prev=src" >> "$GITHUB_OUTPUT"
+            echo "PREV=src (fresh=true)"
+            exit 0
+          fi
+          if exists "$floating"; then
+            echo "prev=$floating" >> "$GITHUB_OUTPUT"
+            echo "PREV=$floating (floating tag)"
+            exit 0
+          fi
+          # Highest-stage wip-<sha>-sm<arch>-N from previous commits (tag uses SHA::7)
+          for sha in $(git log --format=%H -n 20); do
+            short7=${sha:0:7}
+            for s in 4 3 2 1; do
+              t="$repo:wip-${short7}-sm${arch}-${s}"
+              if exists "$t"; then
+                echo "prev=$t" >> "$GITHUB_OUTPUT"
+                echo "PREV=$t (discovered from git history)"
+                exit 0
+              fi
+            done
+          done
+          # Registry tag list as a fallback (covers WIP from a different branch/SHA not in this clone)
+          tags_json=$(curl -fsSL -u "${GITHUB_ACTOR}:${GITHUB_TOKEN}" "https://ghcr.io/v2/${path}/tags/list" || true)
+          pick=$(printf '%s' "$tags_json" | jq -r --arg arch "$arch" '
+            (.tags // [])
+            | map(select(test("^wip-[0-9a-f]+-sm"+$arch+"-[0-9]+$")))
+            | sort_by(split("-") | last | tonumber)
+            | last // empty
+          ')
+          if [ -n "$pick" ] && exists "$repo:$pick"; then
+            echo "prev=$repo:$pick" >> "$GITHUB_OUTPUT"
+            echo "PREV=$repo:$pick (discovered from registry)"
+            exit 0
+          fi
+          echo "prev=src" >> "$GITHUB_OUTPUT"
+          echo "PREV=src (no WIP found)"
+
       - name: Deps layers (base + SPUMA source) with GHA cache
-        if: inputs.stage == 1
+        if: inputs.stage == 1 && steps.prev.outputs.prev == 'src'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -96,11 +160,13 @@ jobs:
           target: compile
           push: true
           provenance: false
-          tags: ${{ steps.v.outputs.wip }}
+          tags: |
+            ${{ steps.v.outputs.wip }}
+            ${{ steps.v.outputs.floating }}
           build-args: |
             NVHPC_TAG=${{ inputs.nvhpc_tag }}
             NVARCH=${{ inputs.nvarch }}
-            PREV=${{ steps.v.outputs.prev }}
+            PREV=${{ steps.prev.outputs.prev }}
             STAGE=${{ inputs.stage }}
             BUILD_BUDGET_MIN=${{ inputs.budget_min }}
           cache-from: type=gha,scope=deps-sm${{ inputs.nvarch }}
@@ -116,7 +182,7 @@ jobs:
           build-args: |
             NVHPC_TAG=${{ inputs.nvhpc_tag }}
             NVARCH=${{ inputs.nvarch }}
-            PREV=${{ steps.v.outputs.prev }}
+            PREV=${{ steps.prev.outputs.prev }}
             STAGE=${{ inputs.stage }}
             BUILD_BUDGET_MIN=${{ inputs.budget_min }}
           cache-from: type=gha,scope=deps-sm${{ inputs.nvarch }}
@@ -127,7 +193,7 @@ jobs:
           s=$(cat status-out/BUILD_STATUS); echo "BUILD_STATUS=$s"
           ls -la status-out
           tail -n 60 status-out/allwmake.stage${{ inputs.stage }}.log || true
-          if [ "$s" = complete ]; then echo "done=true" >> "$GITHUB_OUTPUT"; else echo "done=false" >> "$GITHUB_OUTPUT"; fi
+          if [ "$s" = complete ]; then echo "compile_done=true" >> "$GITHUB_OUTPUT"; else echo "compile_done=false" >> "$GITHUB_OUTPUT"; fi
           if [ "$s" != complete ] && [ "${{ inputs.last }}" = true ]; then echo "::error::compile still partial after the last stage"; exit 1; fi
 
       - name: Upload build logs
@@ -139,7 +205,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Build and push final image
-        if: steps.status.outputs.done == 'true'
+        if: steps.status.outputs.compile_done == 'true'
         id: final
         uses: docker/build-push-action@v6
         with:
@@ -151,13 +217,13 @@ jobs:
           build-args: |
             NVHPC_TAG=${{ inputs.nvhpc_tag }}
             NVARCH=${{ inputs.nvarch }}
-            PREV=${{ steps.v.outputs.prev }}
+            PREV=${{ steps.prev.outputs.prev }}
             STAGE=${{ inputs.stage }}
             BUILD_BUDGET_MIN=${{ inputs.budget_min }}
           cache-from: type=gha,scope=deps-sm${{ inputs.nvarch }}
 
       - name: Report image
-        if: steps.status.outputs.done == 'true'
+        if: steps.final.outcome == 'success'
         run: |
           echo "digest=${{ steps.final.outputs.digest }}"
           docker buildx imagetools inspect --raw "${{ steps.v.outputs.repo }}@${{ steps.final.outputs.digest }}" > manifest.json

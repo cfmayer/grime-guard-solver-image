@@ -53,7 +53,11 @@ curl -sS -X POST https://api.runpod.io/v2/pods -H "Authorization: Bearer $RUNPOD
 `.github/workflows/build.yml` runs on push to `main` and on manual dispatch. The compile is time-boxed per job
 (`budget_min`, default 250 min) and chained over up to 4 jobs: each job resumes the previous job's partial build
 image (`:wip-<sha>-sm90-<n>`; wmake is incremental and layer mtimes are preserved) so no job hits the 6-hour limit.
-The first job that finishes the compile builds the slim `final` stage and pushes the tags. Dependency layers use the
+A later commit's stage 1 resumes from `:wip-sm90` (or the newest `:wip-<sha>-sm90-<n>`) unless you dispatch with
+`fresh=true`. A stage is marked done only after the slim `final` image is pushed, so a failed install check does
+not skip the remaining stages. The first job that finishes the compile and passes `check_install.sh` pushes the
+final tags. `check_install.sh` accepts SPUMA's pitzDaily paths (`pisoFoam/LES` or `pimpleFoam/RAS`); the older
+OpenFOAM `pimpleFoam/LES/pitzDaily` path is not in 0.3-v2512. Dependency layers use the
 GitHub Actions cache. B200 (sm_100): dispatch with `nvarch=100` and an NVHPC >= 25.x tag (e.g.
 `25.3-devel-cuda12.8-ubuntu22.04`); untested. SPUMA upstream has only tested cc 7.0/8.0.
 
